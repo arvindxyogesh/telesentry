@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.pytest_cache/
+checkpoints/
+data/raw/
+!data/raw/
+!data/raw/.gitkeep
+data/processed/anomaly_alerts/
+models/*.joblib
+*.log
