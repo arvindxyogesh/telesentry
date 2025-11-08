@@ -1,0 +1,21 @@
+kafka:
+  bootstrap_servers: "localhost:9092"
+  raw_topic: "telemetry.raw"
+
+streaming:
+  window_duration: "10 seconds"
+  slide_duration: "5 seconds"
+  watermark: "30 seconds"
+  checkpoint_dir: "checkpoints/telemetry_features"
+  alerts_output: "data/processed/anomaly_alerts"
+
+model:
+  model_path: "models/isolation_forest.joblib"
+  scaler_path: "models/feature_scaler.joblib"
+  isolation_threshold: 0.6
+  zscore_threshold: 3.0
+
+simulator:
+  vehicles: 12
+  hz: 5
+  anomaly_probability: 0.03
