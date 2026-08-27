@@ -1,4 +1,6 @@
-# Vehicle Telemetry Anomaly Detection: Benchmarking Classical vs. Deep Sequence Models
+# Telesentry
+
+**Benchmarking classical vs. deep sequence anomaly detectors for vehicle telemetry.**
 
 A research-style benchmark and a working real-time pipeline, in one repo. It compares a
 classical one-class detector (Isolation Forest) against two deep sequence anomaly
