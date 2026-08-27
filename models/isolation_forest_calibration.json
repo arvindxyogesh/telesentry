@@ -1,0 +1,5 @@
+{
+  "threshold": -0.002846991073934335,
+  "contamination": 0.03,
+  "calibration_quantile": 0.97
+}

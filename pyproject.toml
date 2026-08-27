@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vehicle-telemetry-anomaly-detection"
+version = "0.2.0"
+description = "Real-time + batch multivariate anomaly detection for vehicle telemetry, benchmarking classical and deep sequence models."
+requires-python = ">=3.10"
+
+# Runtime dependencies are pinned in requirements.txt (installed separately);
+# this project file exists so `pip install -e .` makes the `src` package
+# importable from any working directory / invocation style (plain script,
+# `python -m`, pytest, uvicorn, streamlit, spark-submit) without PYTHONPATH
+# hacks.
+[tool.setuptools]
+packages = [
+    "src",
+    "src.common",
+    "src.ml",
+    "src.ml.models",
+    "src.streaming",
+    "src.simulator",
+    "src.alert_api",
+    "src.dashboard",
+]

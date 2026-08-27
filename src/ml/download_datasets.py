@@ -1,3 +1,14 @@
+"""Optional supplementary dataset download.
+
+FordA (engine acoustic/vibration sensor readings, UCR/UEA archive) is not
+part of the core train/eval pipeline -- it has a different schema and
+sampling regime than the CAN/IMU/GPS telemetry this project targets. It is
+included as a real-world sensor time series that the same class of
+reconstruction-based sequence models (LSTM autoencoder, attention detector)
+could be adapted to in future work; see the README "Limitations & Future
+Work" section.
+"""
+
 import argparse
 import shutil
 import zipfile

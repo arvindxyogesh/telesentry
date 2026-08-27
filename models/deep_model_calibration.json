@@ -1,0 +1,29 @@
+{
+  "sequence_window": 15,
+  "feature_columns": [
+    "speed_var",
+    "accel_spike_max",
+    "heading_range",
+    "yaw_rate_mean",
+    "sample_count",
+    "gps_speed_delta_mean",
+    "speed_trend"
+  ],
+  "calibration_quantile": 0.97,
+  "lstm_autoencoder": {
+    "hidden_size": 64,
+    "num_layers": 1,
+    "threshold": 0.03209296241402626
+  },
+  "transformer_detector": {
+    "d_model": 32,
+    "nhead": 4,
+    "num_layers": 2,
+    "attention_weight": 0.5,
+    "recon_mean": 2.998741365445312e-05,
+    "recon_std": 2.2917980459169485e-05,
+    "concentration_mean": 0.016307838261127472,
+    "concentration_std": 0.053471699357032776,
+    "threshold": 2.964386224746704
+  }
+}
