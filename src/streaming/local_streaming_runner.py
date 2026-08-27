@@ -1,37 +1,161 @@
+"""Dependency-light replay-based stream processor (a Spark structured
+streaming fallback for local development / demos without a JVM). Feeds a
+parquet telemetry file through the same row-level feature pipeline used
+offline (src.ml.features.compute_row_features), so there is no
+training/serving feature skew, and scores each event with a selectable
+model backend: the original rule-based thresholds, the calibrated Isolation
+Forest, or either trained deep sequence model.
+
+Sequence backends (LSTM autoencoder, Transformer detector) accumulate one
+scaled feature vector per raw sample -- exactly the per-row cadence used to
+build training windows in sequence_dataset.py -- so a SEQUENCE_WINDOW-sample
+warm-up is required per vehicle before they can score at all.
+"""
+
 import argparse
-from collections import deque, defaultdict
+import json
+import time
+from collections import defaultdict, deque
 from datetime import timedelta
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
+import torch
+
+from src.common.constants import FEATURE_COLUMNS, ROW_WINDOW_SAMPLES, SEQUENCE_WINDOW
+from src.ml.features import compute_row_features
+from src.ml.models.lstm_autoencoder import LSTMAutoencoder
+from src.ml.models.transformer_detector import TransformerAnomalyDetector
 
 
-def compute_features(window_df: pd.DataFrame) -> dict:
-    return {
-        "speed_var": float(window_df["speed_kph"].var(ddof=0) if len(window_df) > 1 else 0.0),
-        "accel_spike_max": float(window_df["accel_mps2"].abs().max() if not window_df.empty else 0.0),
-        "heading_range": float(window_df["heading_deg"].max() - window_df["heading_deg"].min() if len(window_df) > 1 else 0.0),
-        "yaw_rate_mean": float(window_df["yaw_rate_dps"].mean() if not window_df.empty else 0.0),
-        "sample_count": float(len(window_df)),
-    }
+class ThresholdBackend:
+    """The original rule-based detector: no trained model required."""
+
+    is_sequence_backend = False
+
+    def __init__(self, speed_var_threshold: float, accel_spike_threshold: float, heading_range_threshold: float):
+        self.speed_var_threshold = speed_var_threshold
+        self.accel_spike_threshold = accel_spike_threshold
+        self.heading_range_threshold = heading_range_threshold
+
+    def score(self, feature_row: dict):
+        ratios = [
+            feature_row["speed_var"] / self.speed_var_threshold,
+            feature_row["accel_spike_max"] / self.accel_spike_threshold,
+            feature_row["heading_range"] / self.heading_range_threshold,
+        ]
+        score = max(ratios)
+        return float(score), bool(score > 1.0)
+
+
+class IsolationForestBackend:
+    is_sequence_backend = False
+
+    def __init__(self, model_path: str, scaler_path: str, calibration_path: str):
+        self.model = joblib.load(model_path)
+        self.scaler = joblib.load(scaler_path)
+        with open(calibration_path, "r", encoding="utf-8") as f:
+            self.threshold = json.load(f)["threshold"]
+
+    def score(self, feature_row: dict):
+        X = self.scaler.transform(pd.DataFrame([feature_row])[FEATURE_COLUMNS])
+        raw = float(-self.model.decision_function(X)[0])
+        return raw, bool(raw > self.threshold)
+
+
+class _SequenceBackend:
+    is_sequence_backend = True
+
+    def __init__(self, scaler_path: str):
+        self.scaler = joblib.load(scaler_path)
+
+    def scale(self, feature_row: dict) -> np.ndarray:
+        return self.scaler.transform(pd.DataFrame([feature_row])[FEATURE_COLUMNS])[0].astype(np.float32)
+
+
+class LSTMBackend(_SequenceBackend):
+    def __init__(self, model_path: str, scaler_path: str, calibration_path: str):
+        super().__init__(scaler_path)
+        with open(calibration_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)["lstm_autoencoder"]
+        self.threshold = cfg["threshold"]
+        self.model = LSTMAutoencoder(num_features=len(FEATURE_COLUMNS), hidden_size=cfg["hidden_size"])
+        self.model.load_state_dict(torch.load(model_path, map_location="cpu"))
+        self.model.eval()
+
+    def score_window(self, window: np.ndarray):
+        x = torch.from_numpy(window[None, :, :])
+        with torch.no_grad():
+            err = float(self.model.reconstruction_error(x).item())
+        return err, bool(err > self.threshold)
+
+
+class TransformerBackend(_SequenceBackend):
+    def __init__(self, model_path: str, scaler_path: str, calibration_path: str):
+        super().__init__(scaler_path)
+        with open(calibration_path, "r", encoding="utf-8") as f:
+            calibration = json.load(f)
+        self.cfg = calibration["transformer_detector"]
+        self.model = TransformerAnomalyDetector(
+            num_features=len(FEATURE_COLUMNS),
+            window=calibration["sequence_window"],
+            d_model=self.cfg["d_model"],
+            nhead=self.cfg["nhead"],
+            num_layers=self.cfg["num_layers"],
+        )
+        self.model.load_state_dict(torch.load(model_path, map_location="cpu"))
+        self.model.eval()
+
+    def score_window(self, window: np.ndarray):
+        x = torch.from_numpy(window[None, :, :])
+        with torch.no_grad():
+            recon_err, concentration = self.model.anomaly_components(x)
+        combined = (recon_err.item() - self.cfg["recon_mean"]) / self.cfg["recon_std"] + self.cfg["attention_weight"] * (
+            (concentration.item() - self.cfg["concentration_mean"]) / self.cfg["concentration_std"]
+        )
+        return float(combined), bool(combined > self.cfg["threshold"])
+
+
+def build_backend(args):
+    if args.model_backend == "threshold":
+        return ThresholdBackend(args.speed_var_threshold, args.accel_spike_threshold, args.heading_range_threshold)
+    if args.model_backend == "iforest":
+        return IsolationForestBackend(args.iforest_model, args.scaler, args.iforest_calibration)
+    if args.model_backend == "lstm":
+        return LSTMBackend(args.lstm_model, args.scaler, args.calibration)
+    if args.model_backend == "transformer":
+        return TransformerBackend(args.transformer_model, args.scaler, args.calibration)
+    raise ValueError(f"Unknown model backend: {args.model_backend}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Local real-time anomaly stream runner (Spark fallback).")
     parser.add_argument("--input", default="data/raw/synthetic_telemetry.parquet")
     parser.add_argument("--output", default="data/processed/anomaly_alerts/alerts.parquet")
-    parser.add_argument("--window-sec", type=int, default=10)
-    parser.add_argument("--slide-sec", type=int, default=5)
+    parser.add_argument(
+        "--model-backend", choices=["threshold", "iforest", "lstm", "transformer"], default="iforest"
+    )
+    parser.add_argument("--slide-sec", type=int, default=5, help="How often (in event time) to emit alert checks.")
     parser.add_argument("--speed-var-threshold", type=float, default=50.0)
     parser.add_argument("--accel-spike-threshold", type=float, default=3.5)
     parser.add_argument("--heading-range-threshold", type=float, default=25.0)
+    parser.add_argument("--iforest-model", default="models/isolation_forest.joblib")
+    parser.add_argument("--iforest-calibration", default="models/isolation_forest_calibration.json")
+    parser.add_argument("--scaler", default="models/feature_scaler.joblib")
+    parser.add_argument("--lstm-model", default="models/lstm_autoencoder.pt")
+    parser.add_argument("--transformer-model", default="models/transformer_detector.pt")
+    parser.add_argument("--calibration", default="models/deep_model_calibration.json")
     args = parser.parse_args()
+
+    backend = build_backend(args)
 
     df = pd.read_parquet(args.input).sort_values("event_time")
     df["event_time"] = pd.to_datetime(df["event_time"], utc=True)
 
-    per_vehicle = defaultdict(deque)
+    raw_windows = defaultdict(lambda: deque(maxlen=ROW_WINDOW_SAMPLES))
+    seq_windows = defaultdict(lambda: deque(maxlen=SEQUENCE_WINDOW))
     next_emit = {}
     alerts = []
 
@@ -39,39 +163,38 @@ def main() -> None:
         vid = row["vehicle_id"]
         ts = row["event_time"]
 
+        raw_windows[vid].append(row)
+        wdf = pd.DataFrame(list(raw_windows[vid]))
+        feat_row = compute_row_features(wdf).iloc[-1][FEATURE_COLUMNS].to_dict()
+
+        if backend.is_sequence_backend:
+            seq_windows[vid].append(backend.scale(feat_row))
+
         if vid not in next_emit:
             next_emit[vid] = ts
 
-        dq = per_vehicle[vid]
-        dq.append(row)
-
-        cutoff = ts - timedelta(seconds=args.window_sec)
-        while dq and pd.to_datetime(dq[0]["event_time"], utc=True) < cutoff:
-            dq.popleft()
-
         if ts >= next_emit[vid]:
-            wdf = pd.DataFrame(list(dq))
-            feats = compute_features(wdf)
-
-            is_anomaly = int(
-                (feats["speed_var"] > args.speed_var_threshold)
-                or (feats["accel_spike_max"] > args.accel_spike_threshold)
-                or (feats["heading_range"] > args.heading_range_threshold)
-            )
+            start = time.perf_counter()
+            if backend.is_sequence_backend:
+                if len(seq_windows[vid]) == SEQUENCE_WINDOW:
+                    score, is_anomaly = backend.score_window(np.stack(seq_windows[vid]))
+                else:
+                    score, is_anomaly = 0.0, False  # warming up
+            else:
+                score, is_anomaly = backend.score(feat_row)
+            inference_latency_ms = (time.perf_counter() - start) * 1000.0
 
             if is_anomaly:
-                processing_time = ts + timedelta(seconds=1)
-                detection_delay = max(0.0, (processing_time - ts).total_seconds())
                 alerts.append(
                     {
                         "vehicle_id": vid,
-                        "window_start": ts - timedelta(seconds=args.window_sec),
                         "window_end": ts,
-                        **feats,
-                        "iforest_score": 0.0,
+                        **{k: float(feat_row[k]) for k in FEATURE_COLUMNS},
+                        "anomaly_score": score,
+                        "model_backend": args.model_backend,
                         "is_anomaly": 1,
-                        "processing_time": processing_time,
-                        "detection_delay_sec": detection_delay,
+                        "processing_time": pd.Timestamp.now(tz="UTC"),
+                        "inference_latency_ms": inference_latency_ms,
                     }
                 )
 
@@ -84,9 +207,9 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(out_path, index=False)
 
-    print(f"Wrote {len(out)} alerts to {out_path}")
+    print(f"Wrote {len(out)} alerts to {out_path} (backend={args.model_backend})")
     if not out.empty:
-        print(out[["vehicle_id", "window_end", "detection_delay_sec", "accel_spike_max"]].head(20).to_string(index=False))
+        print(out[["vehicle_id", "window_end", "anomaly_score", "inference_latency_ms"]].head(20).to_string(index=False))
 
 
 if __name__ == "__main__":

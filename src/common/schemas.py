@@ -1,5 +1,7 @@
 from pyspark.sql.types import DoubleType, StringType, StructField, StructType, TimestampType
 
+from src.common.constants import ANOMALY_TYPES, FEATURE_COLUMNS, ROW_WINDOW_SAMPLES, SEQUENCE_WINDOW
+
 
 TELEMETRY_SCHEMA = StructType(
     [
@@ -15,11 +17,10 @@ TELEMETRY_SCHEMA = StructType(
     ]
 )
 
-
-FEATURE_COLUMNS = [
-    "speed_var",
-    "accel_spike_max",
-    "heading_range",
-    "yaw_rate_mean",
-    "sample_count",
+__all__ = [
+    "TELEMETRY_SCHEMA",
+    "ROW_WINDOW_SAMPLES",
+    "SEQUENCE_WINDOW",
+    "FEATURE_COLUMNS",
+    "ANOMALY_TYPES",
 ]

@@ -8,12 +8,25 @@ streaming:
   watermark: "30 seconds"
   checkpoint_dir: "checkpoints/telemetry_features"
   alerts_output: "data/processed/anomaly_alerts"
+  sequence_window_samples: 15 # ~3s of history at 5 Hz, for the deep models
 
-model:
-  model_path: "models/isolation_forest.joblib"
+models:
   scaler_path: "models/feature_scaler.joblib"
-  isolation_threshold: 0.6
-  zscore_threshold: 3.0
+  isolation_forest:
+    model_path: "models/isolation_forest.joblib"
+    calibration_path: "models/isolation_forest_calibration.json"
+    contamination: 0.03
+  lstm_autoencoder:
+    model_path: "models/lstm_autoencoder.pt"
+    hidden_size: 64
+  transformer_detector:
+    model_path: "models/transformer_detector.pt"
+    d_model: 32
+    nhead: 4
+    num_layers: 2
+    attention_weight: 0.5
+  deep_calibration_path: "models/deep_model_calibration.json"
+  calibration_quantile: 0.97 # target ~3% FPR on held-out normal data
 
 simulator:
   vehicles: 12
